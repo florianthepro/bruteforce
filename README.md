@@ -1,308 +1,164 @@
-# Authorized Vulnerability Test Lab
+# Vulnerability Test Lab
 
-Dieses Dokument beschreibt einen autorisierten Testaufbau für kontrolliertes Fuzzing, Zustandsanalyse und reproduzierbare Fehlertriage in einer VM-basierten Laborumgebung.
+Dieses Projekt beschreibt eine kontrollierte Testumgebung zur Erkennung von Schwachstellen in einer VM durch strukturierte Fuzzing-Tests, Zustandsanalyse und automatisierte Triage.
 
 ## Ziel
 
-Ziel ist es, Eingaben kontrolliert an ein Testsystem zu geben, Systemänderungen zu erfassen und auffällige Fälle sauber an eine tiefere Analyse weiterzugeben.
+Ziel ist es, in einer isolierten Laborumgebung potenzielle Fehler, Abstürze, Timeouts, unerwartete Neustarts oder relevante Zustandsänderungen zu erkennen und sauber zu klassifizieren.
 
 Der Fokus liegt auf:
-- reproduzierbaren Tests
-- klarer Trennung von Normalverhalten und echten Auffälligkeiten
-- automatischer Übergabe von Treffern an einen zweiten Analyse-Schritt
-- sauberer Ablage aller Daten pro Testlauf
 
-## Gesamtaufbau
+- kontrollierten Testeingaben
+- reproduzierbaren Abläufen
+- Zustandsvergleich gegen eine Baseline
+- sauberer Trennung zwischen normalem Verhalten und auffälligen Treffern
+- zentraler Speicherung aller Ergebnisse in einer Datenbank
 
-Es gibt zwei Hauptkreisläufe:
+## Architektur
 
-1. **Schnellkreislauf / Triage-Kreislauf**
-   - viele Inputs
-   - kurze Laufzeit
-   - einfache Ja/Nein-Entscheidung
-   - nur auffällige Fälle gehen weiter
+Das System besteht aus zwei getrennten VMs:
 
-2. **Analyse-Kreislauf / Deep-Analysis-Kreislauf**
-   - nur für Treffer aus dem Schnellkreislauf
-   - tiefere Auswertung
-   - Reproduktion
-   - Diff- und Loganalyse
-   - finale Bewertung
+- **VM 1**: prüft die Datenbank auf offene Fälle, die eine tiefere Analyse benötigen
+- **VM 2**: verarbeitet Inputs nacheinander und führt das kontrollierte Fuzzing / Bruteforce aus
 
----
+Zusätzlich gibt es:
 
-## Ablaufdiagramm
+- eine zentrale Datenbank
+- Artefaktordner pro Testlauf
+- eine Baseline-Umgebung als Referenzzustand
+
+## Ablauf
+
+1. VM 2 nimmt einen Input aus der Queue.
+2. Der Input wird gegen die Ziel-VM getestet.
+3. Systemzustand, Dienste, Konfigurationen und Logs werden erfasst.
+4. Die Werte werden mit der Baseline verglichen.
+5. Bei unauffälligem Verhalten wird der Lauf als normal gespeichert.
+6. Bei relevanten Änderungen wird ein Eintrag für die tiefe Analyse erzeugt.
+7. VM 1 prüft die Datenbank regelmäßig auf offene Fälle.
+8. VM 1 übernimmt verdächtige oder bestätigte Treffer für die Deep Analysis.
+9. Die Ergebnisse werden zurück in die Datenbank geschrieben.
+
+## Mermaid-Diagramm
 
 ```mermaid
 flowchart TD
-    A[Basissnapshot der VM] --> B[Runner 1 startet]
-    B --> C[Baseline erfassen]
-    C --> D[Testinput laden]
+    DB[(Zentrale Datenbank)]
 
-    D --> E[Input an Zielsystem senden]
-    E --> F[Systemzustand nach Ausführung erfassen]
+    subgraph VM1[VM 1 - Prüf- und Analyse-VM]
+        A1[DB nach offenen Fällen prüfen]
+        A2{Offene Arbeit vorhanden?}
+        A3[Fall für Deep Analysis laden]
+        A4[Tiefe Analyse durchführen]
+        A5[Ergebnis + Bewertung zurück in DB schreiben]
+        A6[Fall als erledigt markieren]
+    end
 
-    F --> G{Vergleich gegen Baseline}
+    subgraph VM2[VM 2 - Test- und Bruteforce-VM]
+        B1[Input-Queue laden]
+        B2[Input nacheinander ausführen]
+        B3[Systemzustand erfassen]
+        B4[Mit Baseline vergleichen]
+        B5{Relevanter Treffer?}
+        B6[Normalen Lauf in DB speichern]
+        B7[Treffer + Artefakte in DB schreiben]
+        B8[Job für VM1 anlegen]
+    end
 
-    G -- kein Unterschied --> H[Kein Treffer]
-    H --> I[DB: normaler Lauf speichern]
-    I --> J[Nächster Input]
+    DB --> A1
+    A1 --> A2
+    A2 -- ja --> A3 --> A4 --> A5 --> A6 --> DB
+    A2 -- nein --> A1
 
-    G -- nur Log-Änderung --> K[Wahrscheinlich normal]
-    K --> L[DB: Lauf markieren]
-    L --> J
-
-    G -- Service/Config-Änderung oder Crash/Timeout --> M[Treffer]
-    M --> N[Artefakte sichern]
-    N --> O[Übergabe an Runner 2]
-
-    O --> P[Deep Analysis]
-    P --> Q[Reproduktion prüfen]
-    Q --> R[Differenzen, Logs, Zustand auswerten]
-    R --> S[DB: Ergebnis + Bewertung speichern]
-    S --> T[Optional: VM zurücksetzen]
-    T --> J
+    DB --> B1
+    B1 --> B2 --> B3 --> B4 --> B5
+    B5 -- nein --> B6 --> B2
+    B5 -- ja --> B7 --> B8 --> DB
+    B2 --> B2
 ```
 
----
+## Testmethodik
 
-## Beschreibung der beiden Kreisläufe
+Statt blindem Bruteforce wird eine strukturierte Methodik verwendet:
 
-### 1) Schnellkreislauf / Runner 1
+- mutation-based fuzzing
+- grammar-based fuzzing
+- binary inputs statt nur Text
+- Zustandsvergleich nach jedem Lauf
+- Trennung von normalem Noise und echten Auffälligkeiten
 
-Dieser Kreislauf ist für hohe Geschwindigkeit gedacht.
+Binary Inputs sind bevorzugt, da sie eher Parserfehler, Speicherfehler oder unerwartete Zustände auslösen können.
 
-**Aufgaben von Runner 1:**
-1. VM aus Basissnapshot starten
-2. Baseline-Werte erfassen
-3. Testinput ausführen
-4. Nach der Ausführung den Zustand messen
-5. Mit der Baseline vergleichen
-6. Ergebnis in der Datenbank speichern
-7. Nur bei relevanten Treffern Übergabe an Runner 2
+## Baseline
 
-**Was Runner 1 nicht macht:**
-- keine lange Detailanalyse
-- keine manuelle Untersuchung jedes Inputs
-- keine vollständige forensische Auswertung
+Die Baseline ist ein definierter Ausgangszustand der Ziel-VM.
 
-**Ziel:**
-Aus vielen Tests schnell nur die Fälle herausfiltern, die wirklich weiter untersucht werden müssen.
+Sie enthält:
 
----
+- Betriebssystemzustand
+- laufende Dienste
+- Konfigurationen
+- relevante Logs
+- Netzwerk-/Portstatus
+- Zeitstempel
+- Hashwerte
 
-### 2) Analyse-Kreislauf / Runner 2
+### Verwendete Hashes
 
-Dieser Kreislauf wird nur für relevante Treffer benutzt.
-
-**Aufgaben von Runner 2:**
-1. relevanten Fall übernehmen
-2. Artefakte einsammeln
-3. Logs und Diffs analysieren
-4. Zustand erneut prüfen
-5. Reproduktion testen
-6. Bewertung in der Datenbank ergänzen
-7. Entscheidung über Reset oder weiteren Test treffen
-
-**Ziel:**
-Aus einem auffälligen Lauf einen reproduzierbaren, dokumentierten Befund machen.
-
----
-
-## Datenfluss zwischen den Komponenten
-
-### Eingangsfluss
-- Der Fuzzer oder Testgenerator erzeugt einen Input.
-- Der Input wird als Datei abgelegt.
-- Runner 1 liest diesen Input und führt ihn im Zielsystem aus.
-
-### Messfluss
-Nach der Ausführung misst Runner 1:
-- Gesamthash
-- Service-Hash
-- Config-Hash
-- Log-Hash
-- Service-Status
-- Crash-/Timeout-Signale
-
-### Entscheidungsfluss
-Die Messergebnisse bestimmen:
-- **kein Unterschied** → Lauf endet normal
-- **nur Log-Änderung** → meist normal, speichern und weiter
-- **Service-/Config-Änderung** → Treffer
-- **Crash/Timeout** → Treffer
-
-### Übergabefluss
-Bei einem Treffer:
-- Artefakte werden gespeichert
-- Metadaten werden geschrieben
-- Datensatz wird an Runner 2 übergeben
-- Runner 2 übernimmt die tiefere Analyse
-
----
-
-## Basissnapshot
-
-Der Basissnapshot enthält:
-- Betriebssystem
-- Grunddienste
-- Standardkonfiguration
-- notwendige Testsoftware
-- vorbereitete Verzeichnisstruktur
-
-**Warum Snapshot?**
-- schneller Start
-- konsistenter Ausgangszustand
-- einfache Rücksetzung
-- weniger Rauschen in den Ergebnissen
-
----
-
-## Baseline-Erfassung
-
-Vor jedem Testlauf oder vor einer Testserie wird eine Baseline erzeugt.
-
-### Baseline enthält:
 - **Gesamthash**: grober Gesamtzustand
 - **Service-Hash**: relevante Service-Dateien
-- **Config-Hash**: Konfigurationsdateien ohne volatile Einträge
-- **Log-Hash**: Logs getrennt betrachtet
-- **Service-Status**: läuft / gestoppt / abgestürzt
-- **Portstatus**: offene Ports
-- **Zeitstempel**
+- **Config-Hash**: Konfigurationen ohne volatile Daten
+- **Log-Hash**: getrennt erfasst, um normales Logging von echten Änderungen zu trennen
 
-### Warum mehrere Hashes?
-Damit normale Änderungen nicht mit echten Problemen verwechselt werden.
+## Triage-Logik
 
-Beispiele:
-- Nur Log-Änderung → oft normal
-- Config-Änderung → verdächtig
-- Service-Dateien verändert → sehr verdächtig
-- Crash/Timeout → sofort relevant
+Die erste Bewertung erfolgt automatisch durch VM 2.
 
----
+### Bewertung
 
-## Entscheidungslogik
+- **kein Hash-Unterschied**  
+  → normal, speichern und ignorieren
 
-### Kein Unterschied
-Wenn alle relevanten Hashes gleich bleiben:
-- kein Treffer
-- kein Reset nötig
-- Lauf wird als normal gespeichert
+- **nur Log-Hash verändert**  
+  → meist normal, kein Deep-Dive
 
-### Nur Log-Hash verändert
-Wenn nur Logs anders sind:
-- meist erwartbar
-- nur dokumentieren
-- kein tiefer Eingriff nötig
+- **Service-Hash oder Config-Hash verändert**  
+  → verdächtig, an VM 1 übergeben
 
-### Service- oder Config-Hash verändert
-Wenn Service- oder Konfigurationsdaten betroffen sind:
-- Treffer
-- Artefakte sichern
-- Runner 2 startet
+- **Crash / Timeout / Restart**  
+  → verdächtig, an VM 1 übergeben
 
-### Crash, Timeout oder Restart
-Wenn das Zielsystem ausfällt:
-- Treffer
-- sofortige Sicherung
-- tiefere Analyse
-- ggf. Reset
+### Relevante Trigger für Deep Analysis
 
----
+- Änderung von Service-Hash
+- Änderung von Config-Hash
+- Crash
+- Timeout
+- Prozessabbruch
+- unerwarteter Neustart
+- manuelle Markierung als verdächtig
 
-## Ordnerstruktur
+## VM-Reset-Logik
 
-```text
-lab/
-  baseline/
-    general/
-    service/
-    config/
-    logs/
+Ein Reset der Test-VM erfolgt nur bei Bedarf.
 
-  inputs/
-    queue/
-    processed/
-    rejected/
+### Kein Reset, wenn:
 
-  runs/
-    <test-id>/
-      input.bin
-      hashes.txt
-      metadata.json
-      logs/
-      diff/
-      state/
-      notes.txt
+- kein relevanter Unterschied erkannt wurde
+- nur normale Log-Änderungen aufgetreten sind
 
-  reports/
-    summary.csv
-    findings/
-    triage/
+### Reset, wenn:
 
-  db/
-    results.sqlite
-    exports/
+- ein relevanter Treffer vorliegt
+- der Zustand unzuverlässig geworden ist
+- ein reproduzierbarer Fehler die Baseline verändert hat
 
-  runners/
-    runner1/
-    runner2/
-```
+## Datenbank
 
----
+Alle Ergebnisse werden zentral gespeichert.
 
-## Struktur eines einzelnen Testlaufs
+### Felder
 
-```text
-runs/<test-id>/
-  input.bin
-  hashes.txt
-  metadata.json
-  logs/
-    before.log
-    after.log
-    service.log
-    syslog.log
-  diff/
-    files.diff
-    config.diff
-    service.diff
-  state/
-    processes.txt
-    ports.txt
-    checksums.txt
-  notes.txt
-```
-
-### Bedeutung der Dateien
-
-- **input.bin**  
-  Der verwendete Testinput
-
-- **hashes.txt**  
-  Alle Hashwerte des Laufs
-
-- **metadata.json**  
-  Maschinenlesbare Metadaten zum Lauf
-
-- **logs/**  
-  Alle gesammelten Protokolle
-
-- **diff/**  
-  Unterschied zwischen Baseline und aktuellem Zustand
-
-- **state/**  
-  Prozess- und Portstatus
-
-- **notes.txt**  
-  Freitext zur Bewertung oder manuellen Beobachtung
-
----
-
-## Datenbankstruktur
-
-### Empfohlene Felder
 - Test-ID
 - Timestamp
 - Input-Typ
@@ -316,119 +172,154 @@ runs/<test-id>/
 - Reproduzierbar
 - Bewertung
 - Priorität
-- Artefaktpfad
+- Pfad zum Artefaktordner
 - Runner
 - Kommentar
 
-### Beispiel für die Bewertung
-- **normal**
-- **verdächtig**
-- **reproduzierbar**
-- **bestätigt**
-- **falsch positiv**
+### Bewertungen
 
----
+- normal
+- verdächtig
+- reproduzierbar
+- bestätigt
+- falsch positiv
 
-## Übergabe von Runner 1 an Runner 2
+## Artefaktstruktur
 
-### Übergaberegel
-Ein Fall wird übergeben, wenn mindestens eines zutrifft:
-- Service-Hash geändert
-- Config-Hash geändert
-- Crash
-- Timeout
-- Prozessabbruch
-- unerwarteter Neustart
-- manuelle Markierung als verdächtig
+Jeder Testlauf erhält einen eigenen Ordner:
 
-### Übergabedaten
-Runner 2 erhält:
-- Pfad zum Artefaktordner
-- Input-Datei
-- Hashwerte
-- Logs
-- Diff-Dateien
-- Metadaten
-- erste Bewertung von Runner 1
-
-### Zweck der Übergabe
-Runner 2 soll nicht neu suchen, sondern den bereits markierten Fall sauber auswerten.
-
----
-
-## Reset-Regel
-
-Ein Reset der VM erfolgt nur, wenn es sinnvoll ist.
-
-### Kein Reset bei:
-- unverändertem Zustand
-- nur Log-Änderungen
-- normalem Lauf ohne Auffälligkeit
-
-### Reset bei:
-- relevantem Treffer
-- unzuverlässigem Zustand
-- Crash oder Hänger
-- erfolgreicher Reproduktion mit verändertem Systemzustand
-
----
-
-## Metadaten-Beispiel
-
-```json
-{
-  "test_id": "run-000123",
-  "timestamp": "2026-10-23T14:30:00Z",
-  "input_type": "binary",
-  "input_file": "input.bin",
-  "result": "relevant",
-  "reproducible": true,
-  "runner": "runner1",
-  "artifact_path": "runs/run-000123/",
-  "hashes": {
-    "overall": "…",
-    "service": "…",
-    "config": "…",
-    "log": "…"
-  }
-}
+```text
+runs/<test-id>/
+├── input.bin
+├── hashes.txt
+├── metadata.json
+├── logs/
+│   ├── before.log
+│   ├── after.log
+│   ├── service.log
+│   └── syslog.log
+├── diff/
+│   ├── files.diff
+│   ├── config.diff
+│   └── service.diff
+├── state/
+│   ├── processes.txt
+│   ├── ports.txt
+│   └── checksums.txt
+└── notes.txt
 ```
 
----
+## Globale Ordnerstruktur
 
-## Inhalt der README-Nutzung
+```text
+lab/
+├── baseline/
+│   ├── general/
+│   ├── service/
+│   ├── config/
+│   └── logs/
+├── inputs/
+│   ├── queue/
+│   ├── processed/
+│   └── rejected/
+├── runs/
+├── reports/
+│   ├── summary.csv
+│   ├── findings/
+│   └── triage/
+├── db/
+│   ├── results.sqlite
+│   └── exports/
+└── runners/
+    ├── runner1/
+    └── runner2/
+```
 
-Diese README kann direkt für:
-- GitHub
-- lokale Dokumentation
-- interne Testlab-Dokumentation
-- Projekthandbuch
-- Übergabe an Teammitglieder
+## Runner-Rollen
 
-verwendet werden.
+### VM 2
 
----
+Aufgaben:
 
-## Kurzfassung des Konzepts
+- Input aus Queue laden
+- Inputs nacheinander testen
+- Zustand erfassen
+- Hashes vergleichen
+- normale Läufe speichern
+- verdächtige Treffer an die Datenbank melden
 
-1. Basissnapshot starten
-2. Baseline erfassen
-3. Input ausführen
-4. Zustand messen
-5. Gegen Baseline vergleichen
-6. Normale Fälle ignorieren oder dokumentieren
-7. Relevante Treffer an Runner 2 übergeben
-8. Deep Analysis durchführen
-9. Ergebnis speichern
-10. VM nur bei Bedarf zurücksetzen
+### VM 1
 
----
+Aufgaben:
 
-## Zweck der Trennung
+- offene Fälle in der Datenbank prüfen
+- verdächtige Treffer laden
+- tiefe Analyse ausführen
+- Reproduzierbarkeit prüfen
+- Ergebnis klassifizieren
+- Eintrag aktualisieren
 
-Die Trennung in zwei Kreisläufe sorgt dafür, dass:
-- schnelle Tests nicht durch Tiefenanalyse ausgebremst werden
-- nur echte Treffer weiterverarbeitet werden
-- Artefakte sauber strukturiert bleiben
-- Ergebnisse reproduzierbar sind
-- Debugging und Dokumentation einfacher werden
+## Deep Analysis
+
+Wenn ein Fall an VM 1 übergeben wird, werden typischerweise folgende Schritte ausgeführt:
+
+- erneute Ausführung des Inputs
+- Prüfung auf Reproduzierbarkeit
+- Analyse der Logs
+- Diff der Konfigurationen und Dateien
+- Kontrolle von Prozessen und offenen Ports
+- Bewertung des Schadensbilds
+- Klassifizierung des Falls
+
+## Bewertungskriterien
+
+Ein Fall gilt als relevant, wenn mindestens eines der folgenden Merkmale erfüllt ist:
+
+- reproduzierbarer Crash
+- unplausibler Servicezustand
+- Konfigurationsänderung ohne legitimen Grund
+- unerwartete Dateiänderung
+- Prozessabbruch
+- Timeout mit Folgeeffekt
+- Abweichung vom Baseline-Zustand
+
+## Reporting
+
+Die Reports enthalten:
+
+- Anzahl getesteter Inputs
+- Anzahl normaler Läufe
+- Anzahl verdächtiger Fälle
+- Anzahl bestätigter Funde
+- Reproduzierbarkeit
+- Priorisierung
+- Artefaktverweise
+
+## Sicherheit und Isolation
+
+Die komplette Umgebung muss isoliert betrieben werden:
+
+- keine produktiven Systeme
+- keine echten Nutzdaten
+- keine unkontrollierten Netzverbindungen
+- nur autorisierte Testsysteme
+
+## Erweiterungen
+
+Mögliche Erweiterungen:
+
+- zusätzliche Worker
+- automatische Priorisierung
+- bessere Klassifizierung durch Heuristiken
+- Signaturerkennung
+- historische Trendanalyse
+- Export nach CSV / JSON / SQLite
+
+## Kurzfassung
+
+- VM 2 testet Inputs nacheinander
+- VM 1 prüft offene Fälle für Deep Analysis
+- eine zentrale Datenbank steuert den Workflow
+- Hashvergleiche trennen normales Verhalten von verdächtigen Änderungen
+- Artefakte werden pro Testlauf sauber gespeichert
+- das System ist auf Reproduzierbarkeit und saubere Triage ausgelegt
