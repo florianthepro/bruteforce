@@ -1,4 +1,3 @@
-```md
 # Test Lab Pipeline
 
 ```mermaid
